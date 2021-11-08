@@ -1,0 +1,99 @@
+```{r}
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+```
+```{r}
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+```{r}
+tracts00 <- st_read(file.path(root.dir,"/Chapter1/PHL_CT00.geojson")) %>% st_transform('ESRI:102728')
+```
+
+Create new df, `totalPop00`, that includes only Total Population in 2000
+```{r}
+totalPop00 <-
+  tracts00 %>%
+  filter(variable == "P001001")
+```
+
+Look at new df:
+```{r}
+print(nrow(totalPop00))
+print(names(totalPop00))
+print(head(totalPop00))
+```
+
+Let's use some `ggplot`! This creates a 2x2 plot of columns 0-3, using column 4 (`"geometry"`)
+```{r}
+plot(totalPop00)
+```
+
+#Getting fancier w/ggplot2:
+Map using `aes` (aesthetic param) to `fill` the tract polygons by `value` field.
+```{r}
+A <- 
+  ggplot() + geom_sf(data = totalPop00, aes(fill = value))
+```
+
+Convert `value` to 5 quintile categories w/`q5` function
+```{r}
+B <- 
+  ggplot() +
+  geom_sf(data = totalPop00, aes(fill = q5(value)))
+```
+
+Add fill color and legend improvements
+```{r}
+C <-
+  ggplot() +
+  geom_sf(data = totalPop00, aes(fill = q5(value))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(totalPop00, "value"),
+                    name = "Total\nPopulation\n(Quintile Breaks)")
+```
+
+Finally, add a title and map theme
+```{r}
+D <-
+  ggplot() +
+  geom_sf(data = totalPop00, aes(fill = q5(value))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(totalPop00, "value"),
+                    name = "Total\nPopulation\n(Quintile Breaks)") +
+  labs(title = "Total Population", subtitle = "Philadelphia; 2000") +
+  mapTheme()
+```
+
+Use `spread` to convert df from long to wide form
+```{r}
+tracts00 <-
+  dplyr::select(tracts00, -NAME) %>%
+  spread(variable, value) %>%
+  dplyr::select(-geometry) %>%
+  rename(TotalPop = P001001, Whites = P006002, MaleBachelors = PCT025009,
+         FemaleBachelors = PCT025050, MedHHInc = P053001, MedRent = H056001,
+         TotalPoverty = P092001)
+
+st_drop_geometry(tracts00)[1:3,]
+```
+
+Use `mutate` to create new rate variables
+```{r}
+Hidetracts00 <- 
+  tracts00 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2000") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+```
+
