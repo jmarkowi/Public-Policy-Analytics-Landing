@@ -75,25 +75,139 @@ D <-
 
 Use `spread` to convert df from long to wide form
 ```{r}
-tracts00 <-
+tracts00 <- 
   dplyr::select(tracts00, -NAME) %>%
-  spread(variable, value) %>%
-  dplyr::select(-geometry) %>%
-  rename(TotalPop = P001001, Whites = P006002, MaleBachelors = PCT025009,
-         FemaleBachelors = PCT025050, MedHHInc = P053001, MedRent = H056001,
-         TotalPoverty = P092001)
+    spread(variable, value) %>%
+    dplyr::select(-geometry) %>%
+    rename(TotalPop = P001001, Whites = P006002, MaleBachelors = PCT025009,
+           FemaleBachelors = PCT025050, MedHHInc = P053001, MedRent = H056001,
+           TotalPoverty = P092001) 
 
 st_drop_geometry(tracts00)[1:3,]
 ```
 
 Use `mutate` to create new rate variables
 ```{r}
-Hidetracts00 <- 
+tracts00 <- 
   tracts00 %>%
   mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
          pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
          pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
          year = "2000") %>%
   dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+```
+
+Download and add in the 2017 ACS data, matching column names for later combining with `tracts00`
+```{r}
+tracts17 <- 
+  get_acs(geography = "tract", variables = c("B25026_001E","B02001_002E","B15001_050E","B15001_009E","B19013_001E","B25058_001E","B06012_002E"),
+          year=2017, state=42, county=101, geometry=T, output="wide") %>%
+  st_transform('ESRI:102728') %>%
+  rename(TotalPop = B25026_001E, Whites = B02001_002E,
+         FemaleBachelors = B15001_050E, MaleBachelors = B15001_009E,
+         MedHHInc = B19013_001E, MedRent = B25058_001E,
+         TotalPoverty = B06012_002E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop,0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop),0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2017") %>%
+  dplyr::select(-Whites, -FemaleBachelors, -MaleBachelors, -TotalPoverty) 
+```
+
+Combine 2000 and 2017 tracts, stacking with `rbind`
+```{r}
+allTracts <- rbind(tracts00, tracts17)
+```
+
+### Wrangling transit open data (1.2.2)
+Adding in Philly's 2 subway lines: the "El" (rusn E/W down Market St.) and the Broad Street Line (runs N/S on Broad St.)
+
+First, download and bind the two lines (station locations) together into single layer.
+```{r}
+septaStops <- 
+  rbind(
+    st_read("https://opendata.arcgis.com/datasets/8c6e2575c8ad46eb887e6bb35825e1a6_0.geojson") %>% 
+    mutate(Line = "El") %>% 
+    select(Station, Line),
+    st_read("https://opendata.arcgis.com/datasets/2e9037fd5bef406488ffe5bb67d21312_0.geojson") %>%
+    mutate(Line ="Broad_St") %>%
+    select(Station, Line)) %>%
+   st_transform(st_crs(tracts00))
+```
+
+Plots the new data
+```{r}
+ggplot() +
+  geom_sf(data=st_union(tracts00)) +
+  geom_sf(data=septaStops, aes(colour = Line), show.legend = "point", size=2) +
+  scale_colour_manual(values = c("orange","blue")) +
+  labs(title = "Septa Stops", subtitle = "Philadelphia, PA") +
+  mapTheme()
+```
+
+### Relating tracts & subway stops in space (1.2.3)
+Need to find tracts that are *close* to subway stops (w/in a half mile)
+Create "buffers" around each station
+```{r}
+septaBuffers <-
+  rbind(
+    st_buffer(septaStops, 2640) %>% #2640 = 1/2 mile
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+    st_union(st_buffer(septaStops, 2640)) %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+
+# Now plot them both
+ggplot() +
+  geom_sf(data=septaBuffers) +
+  geom_sf(data=septaStops, show.legend = "point") +
+  facet_wrap(~Legend) +
+  mapTheme()
+```
+
+Different ways to select tracts that fall inside the buffers:
+```{r}
+buffer <- filter(septaBuffers, Legend=="Unioned Buffer")
+
+clip <- 
+  st_intersection(buffer, tracts00) %>%
+    dplyr::select(TotalPop) %>%
+    mutate(Selection_Type = "Clip")
+
+selection <- 
+  tracts00[buffer,] %>%
+    dplyr::select(TotalPop) %>%
+    mutate(Selection_Type = "Spatial Selection")
+
+selectCentroids <-
+  st_centroid(tracts00)[buffer,] %>%
+    st_drop_geometry() %>%
+    left_join(dplyr::select(tracts00, GEOID)) %>%
+    st_sf() %>%
+    dplyr::select(TotalPop) %>%
+    mutate(Selection_Type = "Select by Centroids")
+```
+
+Plot the resulting data in 3 maps
+(Hint: `rbind` the 3 selection types together; use `facet_wrap` to return 3 maps)
+```{r}
+selectionTypes <-
+  rbind(clip, selection, selectCentroids)
+
+threeForms <- ggplot() +
+  geom_sf(data=st_union(tracts00)) +
+  geom_sf(data=selectionTypes, aes(fill = q5(TotalPop))) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(selectionTypes, "TotalPop"),
+                    name = "Total Population\n(Quintile Breaks)") +
+  labs(title = "Total population within 1/2mi of subways", 
+       subtitle = "3 Spatial selection techniques") +
+  facet_wrap(~factor(Selection_Type, levels = c("Clip", "Spatial Selection", "Select by Centroids"))) +
+  mapTheme()
+
+threeForms + 
+    theme(strip.text.x = element_text(size = 10))
 ```
 
